@@ -282,11 +282,15 @@ class TestMaxClientInit:
 # ---------------------------------------------------------------------------
 
 class TestOnReadyDoesNotBlockReadLoop:
-    """Regression: on_ready issues its own cmd() calls whose responses are read
-    by the same loop that dispatches it. Awaiting it inline deadlocks until the
-    10s cmd() timeout, which silently empties the contact batch-resolve."""
+    """Regression: on_ready issues its own cmd() calls, and the responses to
+    those calls can only be read by the same loop that dispatched on_ready.
+    Awaiting the callback inline deadlocks until every such request hits its
+    10s timeout, which silently empties the startup contact batch-resolve.
 
-    async def test_handle_returns_before_callback_finishes(self):
+    Both tests use wait_for so the unfixed code fails fast instead of hanging.
+    """
+
+    async def test_handle_does_not_await_callback_to_completion(self):
         import asyncio
         from app.max_client import MaxClient
 
@@ -299,29 +303,33 @@ class TestOnReadyDoesNotBlockReadLoop:
             await released.wait()
             finished.set()
 
-        await client._handle({
-            "opcode": 19, "cmd": 1, "seq": 0,
-            "payload": {"profile": {"id": 42}},
-        })
+        snapshot_frame = {"opcode": 19, "cmd": 1, "seq": 0,
+                          "payload": {"profile": {"id": 42}}}
+        try:
+            await asyncio.wait_for(client._handle(snapshot_frame), timeout=2)
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "_handle() blocked until on_ready finished: the WebSocket read "
+                "loop is stalled, so replies to requests issued inside on_ready "
+                "can never be delivered."
+            )
 
-        # _handle must have returned while the callback is still parked.
-        assert not finished.is_set()
+        assert not finished.is_set(), "callback should still be running in the background"
 
         released.set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        for _ in range(3):
+            await asyncio.sleep(0)
         assert finished.is_set()
 
-    async def test_cmd_issued_from_on_ready_can_be_answered(self):
-        """The read loop stays free, so a response to a cmd() started inside
-        on_ready resolves instead of timing out."""
+    async def test_request_issued_from_on_ready_receives_its_response(self):
+        """End-to-end shape of the bug: fetch_contacts() called inside on_ready
+        must resolve once the loop delivers the matching frame."""
         import asyncio
+        from unittest.mock import AsyncMock
         from app.max_client import MaxClient
 
-        from unittest.mock import AsyncMock as _AsyncMock
-
         client = MaxClient(token="t", device_id="d")
-        client._ws = _AsyncMock()
+        client._ws = AsyncMock()
         client._ws.closed = False
         result = {}
 
@@ -329,14 +337,18 @@ class TestOnReadyDoesNotBlockReadLoop:
         async def ready(snapshot):
             result["contacts"] = await client.fetch_contacts([777])
 
-        await client._handle({
-            "opcode": 19, "cmd": 1, "seq": 0,
-            "payload": {"profile": {"id": 42}},
-        })
-        await asyncio.sleep(0)
+        try:
+            await asyncio.wait_for(
+                client._handle({"opcode": 19, "cmd": 1, "seq": 0,
+                                "payload": {"profile": {"id": 42}}}),
+                timeout=2,
+            )
+        except asyncio.TimeoutError:
+            pytest.fail("_handle() blocked on on_ready; see the test above.")
 
-        # The request went out and is awaiting a response the loop can deliver.
-        assert client._pending, "on_ready's cmd() should be registered as pending"
+        await asyncio.sleep(0)
+        assert client._pending, "on_ready's cmd() should be waiting for a response"
+
         seq = next(iter(client._pending))
         await client._handle({
             "opcode": 32, "cmd": 1, "seq": seq,
