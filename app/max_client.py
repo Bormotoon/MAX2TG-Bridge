@@ -107,6 +107,7 @@ class MaxClient:
         self._on_ready_cb = None
         self._on_message_cb = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._ready_task: asyncio.Task | None = None
         self._session: aiohttp.ClientSession | None = None
         self._dispatch_counter = 0
         self._pending: dict[int, asyncio.Future] = {}
@@ -290,8 +291,16 @@ class MaxClient:
                     # (contact resolution via cmd()), whose responses can only
                     # be read by this very loop. Awaiting it inline deadlocks
                     # until those requests time out.
-                    task = asyncio.create_task(self._on_ready_cb(payload))
-                    task.add_done_callback(_log_task_exception)
+                    #
+                    # Only one run may be in flight: a reconnect delivers a
+                    # fresh snapshot that supersedes whatever the previous run
+                    # was still doing, so cancel it rather than let the two
+                    # interleave.
+                    if self._ready_task and not self._ready_task.done():
+                        log.debug("Cancelling in-flight on_ready from previous connection")
+                        self._ready_task.cancel()
+                    self._ready_task = asyncio.create_task(self._on_ready_cb(payload))
+                    self._ready_task.add_done_callback(_log_task_exception)
 
             elif op == OpCode.DISPATCH:
                 self._dispatch_counter += 1

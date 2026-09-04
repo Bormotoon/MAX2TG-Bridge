@@ -357,3 +357,67 @@ class TestOnReadyDoesNotBlockReadLoop:
         await asyncio.sleep(0)
 
         assert result["contacts"]["contacts"][0]["names"][0]["name"] == "Elena"
+
+
+class TestOnReadySingleFlight:
+    """A reconnect delivers a fresh snapshot that supersedes the previous run,
+    so at most one on_ready may be in flight."""
+
+    async def test_new_snapshot_cancels_previous_run(self):
+        import asyncio
+        from app.max_client import MaxClient
+
+        client = MaxClient(token="t", device_id="d")
+        started = []
+        cancelled = []
+
+        @client.on_ready
+        async def slow_ready(snapshot):
+            started.append(snapshot["profile"]["id"])
+            try:
+                await asyncio.Event().wait()   # never completes on its own
+            except asyncio.CancelledError:
+                cancelled.append(snapshot["profile"]["id"])
+                raise
+
+        frame = lambda uid: {"opcode": 19, "cmd": 1, "seq": 0,
+                             "payload": {"profile": {"id": uid}}}
+
+        await client._handle(frame(1))
+        await asyncio.sleep(0)
+        first = client._ready_task
+
+        await client._handle(frame(2))          # reconnect: new snapshot
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        assert started == [1, 2]
+        assert cancelled == [1], "the previous on_ready should have been cancelled"
+        assert first.cancelled()
+        assert not client._ready_task.done(), "the new run must still be alive"
+
+        client._ready_task.cancel()
+
+    async def test_finished_run_is_not_cancelled_again(self):
+        import asyncio
+        from app.max_client import MaxClient
+
+        client = MaxClient(token="t", device_id="d")
+        runs = []
+
+        @client.on_ready
+        async def quick_ready(snapshot):
+            runs.append(snapshot["profile"]["id"])
+
+        frame = lambda uid: {"opcode": 19, "cmd": 1, "seq": 0,
+                             "payload": {"profile": {"id": uid}}}
+
+        await client._handle(frame(1))
+        await asyncio.sleep(0)
+        assert client._ready_task.done()
+
+        await client._handle(frame(2))
+        await asyncio.sleep(0)
+
+        assert runs == [1, 2]
+        assert not client._ready_task.cancelled()
