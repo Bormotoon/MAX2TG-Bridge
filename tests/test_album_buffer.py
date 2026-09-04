@@ -44,13 +44,43 @@ class TestAlbumBuffer:
         sender.send_media_group.assert_awaited_once()
         assert len(sender.send_media_group.await_args[0][0]) == 3
 
-    async def test_first_caption_wins(self):
+    async def test_empty_caption_does_not_override_the_first(self):
+        buf, sender = _buffer()
+        key = ("c", "u")
+        await buf.add(key, 7, "первая", [_item(1)])
+        await buf.add(key, 7, "", [_item(2)])
+        await asyncio.sleep(0.15)
+        sender.send_media_group.assert_awaited_once()
+        assert sender.send_media_group.await_args[1]["caption"] == "первая"
+
+    async def test_a_different_caption_starts_a_new_album(self):
+        """Two captioned messages back to back are two posts — the second
+        caption must not be silently dropped into the first album."""
         buf, sender = _buffer()
         key = ("c", "u")
         await buf.add(key, 7, "первая", [_item(1)])
         await buf.add(key, 7, "вторая", [_item(2)])
         await asyncio.sleep(0.15)
-        assert sender.send_media_group.await_args[1]["caption"] == "первая"
+        captions = [c[1]["caption"] for c in sender.send_media_group.await_args_list]
+        assert captions == ["первая", "вторая"]
+
+    async def test_thread_id_is_adopted_once_a_real_one_appears(self):
+        """The first part can arrive while ensure_topic is still failing; the
+        album must not end up in General because of it."""
+        buf, sender = _buffer()
+        key = ("c", "u")
+        await buf.add(key, None, "подпись", [_item(1)])
+        await buf.add(key, 42, "", [_item(2)])
+        await asyncio.sleep(0.15)
+        assert sender.send_media_group.await_args[1]["message_thread_id"] == 42
+
+    async def test_a_real_thread_id_is_not_replaced_by_none(self):
+        buf, sender = _buffer()
+        key = ("c", "u")
+        await buf.add(key, 42, "подпись", [_item(1)])
+        await buf.add(key, None, "", [_item(2)])
+        await asyncio.sleep(0.15)
+        assert sender.send_media_group.await_args[1]["message_thread_id"] == 42
 
     async def test_gap_longer_than_window_splits_albums(self):
         buf, sender = _buffer(window=0.05)
@@ -190,10 +220,27 @@ class TestAttachRouting:
         used = await _send_attaches(attaches, client, sender, "хедер", "текст",
                                     7, None, albums, ("c", "u"))
 
-        albums.add.assert_awaited_once()
-        assert len(albums.add.await_args[0][3]) == 2
+        assert albums.add.await_count == 2
         assert used is True
         sender.send_photo.assert_not_awaited()
+
+    async def test_mixed_attachments_keep_their_original_order(self):
+        """PHOTO → DOC → PHOTO must not become PHOTO → PHOTO → DOC."""
+        from app.max_listener import _send_attaches
+        client, sender, albums = self._ctx()
+        order = []
+        albums.add.side_effect = lambda *a, **k: order.append("photo")
+        albums.flush.side_effect = lambda *a, **k: order.append("flush")
+
+        with patch("app.max_listener._send_attach",
+                   new=AsyncMock(side_effect=lambda *a, **k: order.append("doc"))):
+            await _send_attaches(
+                [{"_type": "PHOTO", "baseUrl": "http://x/1"},
+                 {"_type": "FILE", "name": "report.pdf", "url": "http://x/2"},
+                 {"_type": "PHOTO", "baseUrl": "http://x/3"}],
+                client, sender, "хедер", "", 7, None, albums, ("c", "u"))
+
+        assert order == ["photo", "flush", "doc", "photo"]
 
     async def test_document_flushes_the_album_first(self):
         from app.max_listener import _send_attaches
