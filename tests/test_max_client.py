@@ -275,3 +275,73 @@ class TestMaxClientInit:
 
         result = c.on_disconnect(my_handler)
         assert result is my_handler
+
+
+# ---------------------------------------------------------------------------
+# on_ready must not block the WebSocket read loop
+# ---------------------------------------------------------------------------
+
+class TestOnReadyDoesNotBlockReadLoop:
+    """Regression: on_ready issues its own cmd() calls whose responses are read
+    by the same loop that dispatches it. Awaiting it inline deadlocks until the
+    10s cmd() timeout, which silently empties the contact batch-resolve."""
+
+    async def test_handle_returns_before_callback_finishes(self):
+        import asyncio
+        from app.max_client import MaxClient
+
+        client = MaxClient(token="t", device_id="d")
+        released = asyncio.Event()
+        finished = asyncio.Event()
+
+        @client.on_ready
+        async def slow_ready(snapshot):
+            await released.wait()
+            finished.set()
+
+        await client._handle({
+            "opcode": 19, "cmd": 1, "seq": 0,
+            "payload": {"profile": {"id": 42}},
+        })
+
+        # _handle must have returned while the callback is still parked.
+        assert not finished.is_set()
+
+        released.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert finished.is_set()
+
+    async def test_cmd_issued_from_on_ready_can_be_answered(self):
+        """The read loop stays free, so a response to a cmd() started inside
+        on_ready resolves instead of timing out."""
+        import asyncio
+        from app.max_client import MaxClient
+
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        client = MaxClient(token="t", device_id="d")
+        client._ws = _AsyncMock()
+        client._ws.closed = False
+        result = {}
+
+        @client.on_ready
+        async def ready(snapshot):
+            result["contacts"] = await client.fetch_contacts([777])
+
+        await client._handle({
+            "opcode": 19, "cmd": 1, "seq": 0,
+            "payload": {"profile": {"id": 42}},
+        })
+        await asyncio.sleep(0)
+
+        # The request went out and is awaiting a response the loop can deliver.
+        assert client._pending, "on_ready's cmd() should be registered as pending"
+        seq = next(iter(client._pending))
+        await client._handle({
+            "opcode": 32, "cmd": 1, "seq": seq,
+            "payload": {"contacts": [{"id": 777, "names": [{"name": "Elena"}]}]},
+        })
+        await asyncio.sleep(0)
+
+        assert result["contacts"]["contacts"][0]["names"][0]["name"] == "Elena"
