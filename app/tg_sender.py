@@ -148,7 +148,7 @@ class TelegramSender:
     async def send_status(self, text: str) -> None:
         """Send a bridge status notification (connected / lost / restored).
 
-        Goes to STATUS_CHAT_ID when configured — typically the owner's private
+        Goes to TG_STATUS_CHAT_ID when configured — typically the owner's private
         chat — so these never land in the shared supergroup. Without it, falls
         back to the supergroup's General topic (legacy behaviour).
         """
@@ -168,7 +168,7 @@ class TelegramSender:
         )
         if msg is None:
             # Deliberately not falling back to the supergroup: the whole point
-            # of STATUS_CHAT_ID is to keep these out of the shared group.
+            # of TG_STATUS_CHAT_ID is to keep these out of the shared group.
             log.error(
                 "Failed to deliver status notification to %s (has the user "
                 "started a chat with the bot?): %s",
