@@ -52,6 +52,18 @@ class _AlbumBuffer:
     async def add(self, key, thread_id, caption: str, items: list) -> None:
         if not items:
             return
+
+        # A second, different caption means a second post — flush rather than
+        # silently drop the text that came with it.
+        async with self._lock:
+            bucket = self._buckets.get(key)
+            caption_clash = (
+                bucket is not None and caption
+                and bucket.caption and caption != bucket.caption
+            )
+        if caption_clash:
+            await self._flush(key, from_timer=False)
+
         async with self._lock:
             bucket = self._buckets.get(key)
             if bucket is None:
@@ -61,8 +73,15 @@ class _AlbumBuffer:
                     deadline=time.monotonic() + self._max_wait,
                 )
                 self._buckets[key] = bucket
-            elif not bucket.caption and caption:
-                bucket.caption = caption
+            else:
+                if not bucket.caption and caption:
+                    bucket.caption = caption
+                # The first part of an album can arrive while ensure_topic is
+                # still failing, leaving thread_id None. Adopt a real one as
+                # soon as any later part carries it, or the whole album lands
+                # in General instead of the chat's topic.
+                if bucket.thread_id is None and thread_id is not None:
+                    bucket.thread_id = thread_id
             bucket.items.extend(items)
             if bucket.timer is not None:
                 bucket.timer.cancel()
@@ -176,39 +195,35 @@ async def _send_attaches(attaches: list, client, sender, header_text: str,
                          body_text: str, thread_id, msg, albums, key) -> bool:
     """Route one message's attachments to Telegram.
 
-    Album-capable media is buffered (so parts of one album arriving as separate
-    MAX frames end up as a single Telegram post); everything else is sent
-    individually as before, after flushing the album so it cannot be overtaken.
+    Attachments are walked in order. Album-capable media accumulates in the
+    buffer (so parts of one album arriving as separate MAX frames end up as a
+    single Telegram post); anything else flushes that run first and is sent on
+    its own, which keeps mixed attachments in the order MAX sent them.
 
     Returns True when ``body_text`` was already used as a caption.
     """
     caption = f"{header_text}\n{escape(body_text)}" if body_text else header_text
 
-    groupable: list = []
-    others: list = []
-    for attach in attaches:
-        item = await _groupable_item(attach, client)
-        if item is not None:
-            groupable.append(item)
-        else:
-            others.append(attach)
-
     text_used = False
-    if groupable:
-        if albums is not None:
-            await albums.add(key, thread_id, caption, groupable)
-        else:
-            await sender.send_media_group(groupable, caption=caption,
-                                          message_thread_id=thread_id)
-        text_used = bool(body_text)
-        log.info("Buffered %d album item(s) → TG", len(groupable))
-
-    for attach in others:
-        await _flush_album(albums, key)
+    for attach in attaches:
         cap = header_text if text_used else caption
+        item = await _groupable_item(attach, client)
+
+        if item is not None:
+            if albums is not None:
+                await albums.add(key, thread_id, cap, [item])
+            else:
+                await sender.send_media_group([item], caption=cap,
+                                              message_thread_id=thread_id)
+            log.info("Buffered album item → TG")
+        else:
+            # Anything that cannot ride in an album ends the current run, so
+            # the attachments keep the order MAX sent them in.
+            await _flush_album(albums, key)
+            await _send_attach(attach, client, sender, cap, thread_id=thread_id, msg=msg)
+            log.info("Forwarded attach _type=%s → TG", attach.get("_type"))
+
         text_used = text_used or bool(body_text)
-        await _send_attach(attach, client, sender, cap, thread_id=thread_id, msg=msg)
-        log.info("Forwarded attach _type=%s → TG", attach.get("_type"))
 
     return text_used
 
