@@ -1,4 +1,7 @@
-aiohttp>=3.9.0
-python-telegram-bot>=21.0
-python-dotenv>=1.0.0
-httpx[socks]>=0.24.0
+# Upper bounds are deliberate: an unattended `docker build` should not silently
+# pick up a new major version of the Telegram or HTTP client (audit O02).
+# aiohttp >= 3.10 is required for ClientWSTimeout, used to bound socket close.
+aiohttp>=3.10,<4.0
+python-telegram-bot>=21.6,<23.0
+python-dotenv>=1.0,<2.0
+httpx[socks]>=0.27,<0.29

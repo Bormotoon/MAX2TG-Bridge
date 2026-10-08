@@ -1,0 +1,23 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC"]
+ignore = [
+    # Deliberate API surface: cmd(), upload_file() and friends take an explicit
+    # `timeout` so callers can set a per-request deadline. Internally they use
+    # asyncio.wait_for, which is what this rule steers towards anyway.
+    "ASYNC109",
+    # `class X(str, Enum)` is kept over StrEnum on purpose: StrEnum changes
+    # __str__ to return the bare value, and these values are written to the
+    # journal and compared there.
+    "UP042",
+    # Re-raising with `from` is right for wrapped errors, but most of these are
+    # deliberate translations of a library error into our own vocabulary where
+    # the original adds nothing but noise to the log.
+    "B904",
+]
+
+[lint.per-file-ignores]
+# Tests assert on the filesystem directly; a blocking stat in a test is fine.
+"tests/*" = ["E501", "ASYNC109", "ASYNC230", "ASYNC240"]

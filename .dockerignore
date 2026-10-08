@@ -1,20 +1,7 @@
-.env
-.env.example
-.git
-.dockerignore
-.gitignore
-.idea/
-conftest.py
-docker-compose.yml
-Dockerfile
-pytest.ini
-README.md
-__pycache__
-*.pyc
-.venv
-debug/
-logs/
-state/
-tests/
-app/debug
-app/logs
+# Allowlist style: refuse everything, then let the Dockerfile COPY what it needs.
+*
+!app/
+!requirements.txt
+app/__pycache__/
+**/__pycache__/
+**/*.pyc

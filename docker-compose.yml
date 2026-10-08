@@ -1,16 +1,53 @@
 services:
   max2tg:
     build: .
+    image: max2tg:local
     restart: unless-stopped
     env_file: .env
     environment:
       LOG_DIR: /app/logs
       STATE_DIR: /app/state
+      SPOOL_DIR: /app/state/spool
     volumes:
-      - ./logs:/app/logs
+      # Both must survive a redeploy: state/ holds the topic map and the
+      # delivery journal. Losing it means re-created topics and re-delivered
+      # or dropped messages.
       - ./state:/app/state
-    ulimits:
-      nproc: 65535
-      nofile:
-        soft: 65535
-        hard: 65535
+      - ./logs:/app/logs
+    # Matches SHUTDOWN_TIMEOUT_SEC with headroom, so in-flight deliveries get a
+    # chance to finish before SIGKILL. Anything still unfinished is resumed from
+    # the journal on the next start.
+    stop_grace_period: 40s
+    # The image runs as UID 10001; the bind mounts must be writable by it:
+    #   sudo chown -R 10001:10001 ./state ./logs
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          # Bounded because the bridge is now bounded: downloads stream to the
+          # spool under a quota instead of being read whole into memory.
+          memory: 512M
+          pids: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 60s
+      timeout: 10s
+      start_period: 45s
+      retries: 3
+    # NOTE: plain `docker compose up` does not restart an unhealthy container —
+    # `restart: unless-stopped` only reacts to the process exiting. The health
+    # state is there for `docker ps`, for an external monitor, or for a
+    # scheduler (Swarm/Kubernetes) that acts on it. Do not assume a wedged
+    # bridge restarts itself here.
